@@ -538,6 +538,7 @@ class SessionMemoryManager:
 
     def _record_event(self, event: str, **payload):
         item = {"event": event, "time": time.time(), **payload}
+        SESSION_MEMORY_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(SESSION_MEMORY_EVENTS_PATH, "a", encoding="utf-8") as file_obj:
             file_obj.write(json.dumps(item, ensure_ascii=False, default=str) + "\n")
 

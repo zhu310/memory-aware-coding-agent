@@ -51,7 +51,7 @@ def _decode_output(value: bytes | None) -> str:
         candidates = ("utf-16",)
     else:
         preferred = locale.getpreferredencoding(False)
-        candidates = ("utf-8-sig", preferred, "gb18030", "mbcs") if os.name == "nt" else ("utf-8-sig", preferred)
+        candidates = ("utf-8-sig", "gb18030", preferred, "mbcs") if os.name == "nt" else ("utf-8-sig", preferred)
 
     for encoding in dict.fromkeys(candidates):
         try:
