@@ -15,6 +15,8 @@ htmlcov/
 .tasks/
 .team/
 .transcripts/
+.agent_runtime/
+.usage/
 
 # Editor and dependency artifacts
 .vscode/
@@ -29,3 +31,7 @@ agents.zip
 final_version_app/milk-tea-inventory/
 final_version_app/智能体核心设计教学文档/
 .venv/
+
+# Local interview/study notes
+final_version_app/interview_notes/
+skills/project-memory/references/

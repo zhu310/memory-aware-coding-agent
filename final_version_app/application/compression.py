@@ -29,7 +29,9 @@ def apply_tool_result_budget(messages: list):
         if not isinstance(msg, ToolMessage):
             continue
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
-        if len(content) <= TOOL_RESULT_CHAR_BUDGET:
+        if msg.additional_kwargs.get("memory_page"):
+            continue
+        if msg.additional_kwargs.get("budget_clipped") or len(content) <= TOOL_RESULT_CHAR_BUDGET:
             continue
         head = content[:TOOL_RESULT_HEAD_CHARS].rstrip()
         tail = content[-TOOL_RESULT_TAIL_CHARS:].lstrip()
@@ -43,6 +45,7 @@ def apply_tool_result_budget(messages: list):
             f"{tail}"
         )
         msg.content = clipped
+        msg.additional_kwargs["budget_clipped"] = True
 
 
 def summarize_tool_result(tool_name: str, content: str) -> str:
@@ -83,10 +86,13 @@ def microcompact(messages: list):
         if not isinstance(msg, ToolMessage):
             continue
         content = msg.content if isinstance(msg.content, str) else str(msg.content)
+        if msg.additional_kwargs.get("microcompacted"):
+            continue
         tool_name = tool_name_map.get(msg.tool_call_id, "unknown")
         summary = summarize_tool_result(tool_name, content)
         if summary != content:
             msg.content = summary
+            msg.additional_kwargs["microcompacted"] = True
 
 
 def context_collapse(messages: list) -> list:
@@ -178,6 +184,8 @@ def auto_compact(messages: list, session_memory=None, trigger: str = "manual") -
     #    这样不会因为压缩失败直接把主循环卡死
     annotate_messages(messages)
     token_estimate = 0
+    if getattr(session_memory, "durable_archive", False):
+        return session_memory.compact_messages(messages, trigger=trigger)
     if session_memory is not None:
         try:
             from final_version_app.infra.llm import estimate_tokens

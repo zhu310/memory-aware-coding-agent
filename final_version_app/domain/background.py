@@ -23,9 +23,18 @@ class BackgroundManager:
     def _exec(self, task_id: str, command: str, timeout: int):
         """后台线程实际执行的逻辑。"""
         try:
-            stdout, stderr = run_shell(command, timeout=timeout)
-            output = (stdout + stderr).strip()[:50000]
-            self.tasks[task_id].update({"status": "completed", "result": output or "(no output)"})
+            execution = run_shell(command, timeout=timeout)
+            output = execution.output[:50000]
+            if execution.succeeded:
+                self.tasks[task_id].update({"status": "completed", "result": output or "(no output)"})
+            else:
+                detail = output or "The command produced no diagnostic output."
+                self.tasks[task_id].update(
+                    {
+                        "status": "error",
+                        "result": f"Command failed with exit code {execution.exit_code}.\n{detail}"[:50000],
+                    }
+                )
         except Exception as exc:
             self.tasks[task_id].update({"status": "error", "result": str(exc)})
         self.notifications.put(

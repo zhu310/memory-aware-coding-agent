@@ -27,6 +27,14 @@ from final_version_app.application.workspace_ops import (
 from final_version_app.config import TOOL_CACHE_LIMIT
 from final_version_app.infra.shell import run_bash
 
+from typing import Literal
+from typing_extensions import TypedDict, NotRequired
+
+class TodoItem(TypedDict):
+    content: str
+    status: Literal["pending", "in_progress", "completed"]
+    activeForm: NotRequired[str]
+
 ToolHandler = Callable[..., str]
 
 
@@ -39,7 +47,15 @@ def _register_tool_pair(
 ):
     """一次性注册同名工具对象和执行函数。"""
     tools_by_name[name] = tool_obj
-    handlers[name] = handler
+    def validated_handler(**arguments):
+        schema = getattr(tool_obj, "args_schema", None)
+        if schema is not None:
+            unknown = set(arguments) - set(schema.model_fields)
+            if unknown:
+                raise ValueError(f"Unexpected arguments for {name}: {sorted(unknown)}")
+            arguments = schema.model_validate(arguments).model_dump()
+        return handler(**arguments)
+    handlers[name] = validated_handler
 
 
 def build_base_toolset() -> tuple[dict[str, object], dict[str, ToolHandler]]:
@@ -48,9 +64,34 @@ def build_base_toolset() -> tuple[dict[str, object], dict[str, ToolHandler]]:
     tools_by_name: dict[str, object] = {}
     handlers: dict[str, ToolHandler] = {}
 
+    from final_version_app.application.capability_tools import capability_tools
+    for capability in capability_tools():
+        _register_tool_pair(tools_by_name, handlers, capability.name, capability, capability.func)
+
+    from final_version_app.domain.services import get_service_manager
+
+    @tool("service_start")
+    def service_start(command: str, cwd: str = ".", port: int = 0) -> str:
+        """Start a persistent web service in a workspace directory. Use a foreground command without nohup/&. Returns a real authenticated preview URL; Port 0 auto-allocates; command may use {port} or the PORT environment variable. Any free unprivileged internal port is supported."""
+        return json.dumps(get_service_manager().start(command, cwd, port), ensure_ascii=False)
+
+    @tool("service_status")
+    def service_status(port: int = 0) -> str:
+        """Inspect managed service processes, readiness, preview URLs and recent logs. Port 0 lists services and allowed ports."""
+        manager = get_service_manager()
+        return json.dumps({"services": manager.status(port or None), **manager.port_policy(), "logs": manager.logs(port) if port else ""}, ensure_ascii=False)
+
+    @tool("service_stop")
+    def service_stop(port: int) -> str:
+        """Stop the explicitly selected managed service and disable restart recovery."""
+        return json.dumps(get_service_manager().stop(port), ensure_ascii=False)
+
+    for name, fn in [("service_start",service_start),("service_status",service_status),("service_stop",service_stop)]:
+        _register_tool_pair(tools_by_name, handlers, name, fn, fn.func)
+
     @tool("bash")
     def bash_tool(command: str) -> str:
-        """Run a shell command."""
+        """Run a shell command. On Windows this executes PowerShell, despite the compatibility name."""
         return run_bash(command)
 
     @tool("read_file")
@@ -164,7 +205,7 @@ def _register_task_tools(
     """注册任务管理相关工具。"""
 
     @tool("TodoWrite")
-    def todo_write_tool(items: list[dict]) -> str:
+    def todo_write_tool(items: list[TodoItem]) -> str:
         """Update task tracking list."""
         return services.todo.update(items)
 
@@ -197,6 +238,23 @@ def _register_task_tools(
     def load_skill_tool(name: str) -> str:
         """Load specialized knowledge by name."""
         return services.skills.load(name)
+
+    @tool("memory_search")
+    def memory_search_tool(query: str, limit: int = 5) -> str:
+        """Search current thread history by topic, file, symbol or phrase. Returns source-linked episodes and newer decisions."""
+        memory = services.session_memory
+        return memory.search(query, limit) if hasattr(memory, "search") else "Error: Skill memory is unavailable."
+
+    @tool("memory_read")
+    def memory_read_tool(episode_id: str, offset: int = 0, limit: int = 6000) -> str:
+        """Read a current-thread historical Markdown episode; page with next_offset for complete evidence."""
+        memory = services.session_memory
+        return memory.read(episode_id, offset, limit) if hasattr(memory, "read") else "Error: Skill memory is unavailable."
+
+    _register_tool_pair(tools_by_name, handlers, "memory_search", memory_search_tool,
+                        lambda **kw: memory_search_tool.invoke(kw))
+    _register_tool_pair(tools_by_name, handlers, "memory_read", memory_read_tool,
+                        lambda **kw: memory_read_tool.invoke(kw))
 
     @tool("task_create")
     def task_create_tool(subject: str, description: str = "") -> str:

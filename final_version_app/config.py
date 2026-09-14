@@ -8,7 +8,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+PROJECT_ROOT = Path(os.getenv("AGENT_PROJECT_ROOT", Path(__file__).resolve().parent.parent))
+AGENT_ENV_FILE = Path(os.getenv("AGENT_ENV_FILE", PROJECT_ROOT / ".env"))
+if AGENT_ENV_FILE.exists():
+    load_dotenv(AGENT_ENV_FILE, override=True)
 
 WORKDIR = Path.cwd()
 MODEL = os.getenv("MODEL_ID", "qwen3.6-plus")
@@ -20,6 +23,7 @@ DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 # - .team / .tasks 存协作和任务状态
 # - .transcripts 存 legacy 压缩前的完整历史归档
 # - .memory 存结构化 session memory 及其状态文件
+# - .agent_runtime 存 Thread 元数据和 append-only 事件日志
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
 AGENT_RUNS_DIR = TEAM_DIR / "runs"
@@ -27,6 +31,7 @@ TASKS_DIR = WORKDIR / ".tasks"
 SKILLS_DIR = WORKDIR / "skills"
 TRANSCRIPT_DIR = WORKDIR / ".transcripts"
 MEMORY_DIR = WORKDIR / ".memory"
+RUNTIME_STATE_DIR = WORKDIR / ".agent_runtime"
 SESSION_MEMORY_PATH = MEMORY_DIR / "session_memory.md"
 SESSION_MEMORY_STATE_PATH = MEMORY_DIR / "session_memory_state.json"
 SESSION_MEMORY_EVENTS_PATH = MEMORY_DIR / "session_memory_events.jsonl"
@@ -51,6 +56,33 @@ CONTEXT_COLLAPSE_TRIGGER_RATIO = 0.8
 CONTEXT_COLLAPSE_KEEP_RECENT = 18
 CONTEXT_COLLAPSE_MAX_TOOL_TRACES = 12
 TOOL_CACHE_LIMIT = 24
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
+# Runtime guardrails for real interactive use. They keep an autonomous agent from
+# spending an unbounded number of model/tool rounds on a single user turn.
+AGENT_MAX_TOOL_ROUNDS = max(1, _int_env("AGENT_MAX_TOOL_ROUNDS", 8))
+AGENT_MAX_TURN_SECONDS = max(10.0, _float_env("AGENT_MAX_TURN_SECONDS", 120.0))
+AGENT_FINAL_ANSWER_TOKENS = max(256, _int_env("AGENT_FINAL_ANSWER_TOKENS", 1600))
+AGENT_REPL_VERBOSE = os.getenv("AGENT_REPL_VERBOSE", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # Session memory 提取阈值：
 # - INIT_TOKENS：第一次开始建立长期记忆所需的最小 token

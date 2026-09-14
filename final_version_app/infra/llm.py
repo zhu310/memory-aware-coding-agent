@@ -8,19 +8,38 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 import os
+from time import perf_counter
 
+import httpx
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from final_version_app.config import DASHSCOPE_BASE_URL, MODEL
+from final_version_app.infra.usage import usage_ledger
+
+
+def _trust_environment_proxy() -> bool:
+    """Whether model HTTP clients should inherit OS/environment proxy settings."""
+
+    value = os.getenv("LLM_TRUST_ENV_PROXY", "0").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+@lru_cache(maxsize=2)
+def _shared_http_client(trust_env: bool) -> httpx.Client:
+    """Reuse a thread-safe client and avoid broken implicit Windows proxies."""
+
+    return httpx.Client(trust_env=trust_env)
 
 
 def get_llm(max_tokens: int) -> ChatOpenAI:
     """根据 `MODEL_ID` 自动路由到对应 provider。"""
     model_name = MODEL.strip()
     lower_model = model_name.lower()
+    http_client = _shared_http_client(_trust_environment_proxy())
 
     if lower_model.startswith("qwen"):
         api_key = os.getenv("DASHSCOPE_API_KEY")
@@ -32,6 +51,9 @@ def get_llm(max_tokens: int) -> ChatOpenAI:
             api_key=api_key,
             base_url=os.getenv("DASHSCOPE_BASE_URL") or DASHSCOPE_BASE_URL,
             extra_body={"enable_thinking": True},
+            http_client=http_client,
+            timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+            max_retries=1,
         )
 
     if lower_model.startswith("deepseek"):
@@ -43,6 +65,9 @@ def get_llm(max_tokens: int) -> ChatOpenAI:
             max_tokens=max_tokens,
             api_key=api_key,
             base_url=os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com/v1",
+            http_client=http_client,
+            timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+            max_retries=1,
         )
 
     api_key = (
@@ -58,6 +83,9 @@ def get_llm(max_tokens: int) -> ChatOpenAI:
         max_tokens=max_tokens,
         api_key=api_key,
         base_url=os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1",
+        http_client=http_client,
+        timeout=float(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+        max_retries=1,
     )
 
 
@@ -88,10 +116,18 @@ def invoke_langchain(
     if system:
         inputs.append(SystemMessage(content=system))
     inputs.extend(messages)
-    out = llm.invoke(inputs)
+    started = perf_counter()
+    try:
+        out = llm.invoke(inputs)
+    except BaseException as exc:
+        usage_ledger.record_failure(MODEL, perf_counter() - started, exc)
+        raise
     if isinstance(out, AIMessage):
+        usage_ledger.record_success(out, MODEL, perf_counter() - started)
         return out
-    return AIMessage(content=str(out))
+    normalized = AIMessage(content=str(out))
+    usage_ledger.record_success(normalized, MODEL, perf_counter() - started)
+    return normalized
 
 
 def _tool_schema(tool_obj) -> dict:

@@ -9,8 +9,6 @@ class TodoManager:
     def update(self, items: list) -> str:
         """校验并更新 todo 列表。"""
         validated, in_progress = [], 0
-
-        # 状态别名映射表
         status_aliases = {
             "pending": "pending",
             "\u5f85\u529e": "pending",
@@ -26,13 +24,12 @@ class TodoManager:
             "\u5b8c\u6210": "completed",
             "\u5df2\u5b8c\u6210": "completed",
         }
-        
         for index, item in enumerate(items):
             content = str(item.get("content", "")).strip()
             status_raw = item.get("status", "pending")
             status_text = str(status_raw).strip()
             status = status_aliases.get(status_text.lower()) or status_aliases.get(status_text)
-            active_form_raw = item.get("activeForm", "")
+            active_form_raw = item.get("activeForm", content)
             if not content:
                 raise ValueError(f"Item {index}: content required")
             if status not in ("pending", "in_progress", "completed"):

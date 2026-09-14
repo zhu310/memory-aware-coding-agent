@@ -132,6 +132,7 @@ class SessionMemoryIntegrationTests(unittest.TestCase):
             patch.object(session_memory_module, "SESSION_MEMORY_COMPACT_BUFFER", 5),
             patch.object(session_memory_module, "TOKEN_THRESHOLD", 100),
             patch.object(compression_module, "TRANSCRIPT_DIR", self.transcript_dir),
+            patch.object(SessionMemoryManager, "_run_memory_editor", side_effect=ValueError("disabled in session-memory tests")),
         ]
         for item in self.patches:
             item.start()
