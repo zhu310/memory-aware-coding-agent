@@ -12,6 +12,16 @@ from final_version_app.domain.creative_jobs import CreativeJobs
 def store(tmp_path):
     s=AssetStore(tmp_path);yield s;s.executor.shutdown()
 
+def wav_bytes():
+    import wave
+    data=io.BytesIO()
+    with wave.open(data,'wb') as audio:
+        audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(8000);audio.writeframes(b'\0\0'*8000)
+    return data.getvalue()
+
+def mp3_bytes():
+    return (bytes.fromhex('fffb9064')+b'\0'*413)*20
+
 def test_word_cross_run_replacement_preserves_source_and_format(store):
     doc=Document();p=doc.add_paragraph();p.add_run('Budget: ');p.add_run('old ').bold=True;p.add_run('name');p.add_run(' / unchanged').italic=True
     doc.add_table(rows=1,cols=1).cell(0,0).text='old name'
@@ -45,6 +55,30 @@ def test_music_missing_config_and_unknown_recovery(store,monkeypatch):
     with store.connect() as db:db.execute('INSERT INTO creative_jobs VALUES (?,?,?,?,?,?,?,?)',(job,'recover',json.dumps({'kind':'music','prompt':'music','seconds':30}),'running',None,None,now,now))
     jobs.recover();assert jobs.status(job)['state']=='unknown';jobs.executor.shutdown()
 
+def test_music_generate_persists_validated_mp3_asset(store,monkeypatch):
+    class StreamResponse:
+        status_code=200
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def iter_bytes(self):
+            data=mp3_bytes()
+            yield data[:2000];yield data[2000:]
+    class FakeClient:
+        def __init__(self,*args,**kwargs):pass
+        def __enter__(self):return self
+        def __exit__(self,*args):return False
+        def stream(self,*args,**kwargs):return StreamResponse()
+    monkeypatch.setenv('ELEVENLABS_API_KEY','test-key')
+    monkeypatch.setattr('final_version_app.domain.creative_jobs.httpx.Client',FakeClient)
+    jobs=CreativeJobs(store)
+    job=jobs.start('music','music-request',prompt='short piano loop',seconds=3)
+    completed=jobs.check(job['id'],wait_seconds=30);assert completed['state']=='completed',completed
+    asset=completed['result']['assets'][0];assert asset['status']=='ready' and asset['name'].endswith('.mp3')
+    parsed=store.read(asset['id']);assert parsed['kind']=='media'
+    assert parsed['media']['media_kind']=='audio' and parsed['media']['format']=='mp3'
+    assert parsed['media']['sample_rate_hz']==44100 and parsed['media']['bitrate_bps']==128000
+    jobs.executor.shutdown()
+
 def test_office_job_idempotent_and_cancellation_before_execution(store,monkeypatch):
     from concurrent.futures import Future
     monkeypatch.setenv('AGENT_CREATIVE_URL','http://office:8094');jobs=CreativeJobs(store)
@@ -55,23 +89,21 @@ def test_office_job_idempotent_and_cancellation_before_execution(store,monkeypat
     assert jobs.cancel(first['id'])['state']=='cancelled';jobs._run(first['id']);assert jobs.status(first['id'])['state']=='cancelled';jobs.executor.shutdown()
 
 
-def test_audio_probe_range_download_and_auth(store,monkeypatch,tmp_path):
-    import wave,shutil
-    if not shutil.which('ffprobe'):pytest.skip('Linux media image contains ffprobe')
+def test_audio_upload_metadata_range_download_and_auth(store,monkeypatch,tmp_path):
     from fastapi.testclient import TestClient
     from final_version_app.tests.test_workspace_auth import make_app,CREDENTIALS
     monkeypatch.setattr('final_version_app.storage.assets.get_asset_store',lambda:store)
-    data=io.BytesIO()
-    with wave.open(data,'wb') as audio:audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(8000);audio.writeframes(b'\0\0'*8000)
+    data=wav_bytes()
     client=TestClient(make_app(tmp_path));assert client.get('/api/creative-jobs').status_code==401
     client.post('/api/auth/setup',json=CREDENTIALS)
-    created=client.post('/api/files?name=sample.wav',content=data.getvalue());assert created.status_code==201
+    created=client.post('/api/files?name=sample.wav',content=data);assert created.status_code==201
     asset=created.json()
     for _ in range(100):
         if store.metadata(asset['id'])['status']!='queued' and store.metadata(asset['id'])['status']!='processing':break
         time.sleep(.05)
     assert store.metadata(asset['id'])['status']=='ready'
-    assert store.read(asset['id'])['kind']=='media'
+    parsed=store.read(asset['id']);assert parsed['kind']=='media'
+    assert parsed['media']=={'media_kind':'audio','format':'wav','codec':'pcm','duration_seconds':1.0,'sample_rate_hz':8000,'channels':1,'sample_width_bits':16,'bitrate_bps':128000}
     response=client.get(asset['download_url'],headers={'Range':'bytes=0-31'});assert response.status_code==206
-    assert response.content==data.getvalue()[:32];assert response.headers['content-type']=='audio/wav'
+    assert response.content==data[:32];assert response.headers['content-type']=='audio/wav'
     client.post('/api/auth/logout');assert client.get(asset['download_url']).status_code==401

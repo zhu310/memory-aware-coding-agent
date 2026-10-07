@@ -69,6 +69,24 @@ runtime.events(thread_id)
 Transport adapters should prefer `runtime.submit(command)` so they only depend
 on protocol objects. Direct methods remain convenient for in-process callers.
 
+## Deployment boundary
+
+The supported deployment topology is:
+
+```text
+1 Workspace = 1 API Process = 1 AgentRuntime
+```
+
+Multiple API processes writing to the same workspace are outside the current
+support boundary. The JSONL/file stores are intentionally local and simple; they
+are not a cross-process coordination layer.
+
+The optional Gateway is only a static route table from account/slot names to
+pre-existing Runtime API URLs. It does not create workspaces, start runtimes,
+allocate ports, manage containers, provision volumes, or verify the workspace
+identity behind a URL. Deployers must ensure each configured slot points to the
+intended independent workspace runtime.
+
 ## Compatibility policy
 
 The original `build_runtime()` tuple and optional-free `agent_loop(...)` call
@@ -92,8 +110,8 @@ Production entrypoints should use `build_agent_runtime()`.
 - The current shell safety layer is still a command blacklist, not an OS sandbox.
 - Tools are still advertised eagerly; deferred tool discovery is the next Token
   optimization stage.
-- JSONL is appropriate for the local runtime; multi-process workers will need a
-  transactional or remote EventStore implementation.
+- JSONL is appropriate for the local runtime; multiple API processes sharing one
+  workspace are not supported by the current architecture.
 - Usage is recorded per Turn, but hard budgets and shared subagent-tree budgets
   are not enforced yet.
 

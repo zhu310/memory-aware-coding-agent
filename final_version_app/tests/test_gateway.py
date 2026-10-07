@@ -1,6 +1,7 @@
 """Account routing and global capacity boundaries, with independent fake backends."""
 import json
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from final_version_app.gateway import create_gateway
 
@@ -17,7 +18,9 @@ def gateway(tmp_path,monkeypatch):
             if body['username']!=expected or body['password']!='correct-password':return httpx.Response(401,json={'detail':'Incorrect credentials'})
             return httpx.Response(200,json={'authenticated':True,'configured':True,'username':expected},headers={'set-cookie':f'agent_workspace_session={host}-secret; HttpOnly; Secure; Path=/api'})
         if request.url.path=='/api/auth/status':return httpx.Response(200,json={'authenticated':authenticated,'username':expected if authenticated else None})
-        if request.url.path=='/api/health':return httpx.Response(200,json={'queue':{'inflight':state[host]}})
+        if request.url.path=='/api/health':
+            if state[host]=='error':raise httpx.ConnectError('runtime unavailable',request=request)
+            return httpx.Response(200,json={'queue':{'inflight':state[host]}})
         if not authenticated:return httpx.Response(401,json={'detail':'Please sign in'})
         if request.url.path=='/api/runs':state[host]+=1;return httpx.Response(202,json={'thread_id':host+'-thread'})
         return httpx.Response(200,json={'workspace':host})
@@ -40,7 +43,10 @@ def test_account_login_switch_and_forged_slot(tmp_path,monkeypatch):
     assert forged.status_code==401
     assert client.post('/api/auth/login',json={'username':'admin','password':'correct-password'}).status_code==200
     assert client.get('/api/threads').json()['workspace']=='owner'
-    assert len(client.get('/api/admin/accounts').json()['accounts'])==2
+    accounts=client.get('/api/admin/accounts').json()['accounts']
+    assert len(accounts)==2
+    assert all('configured_route' in account for account in accounts)
+    assert all('isolated_workspace' not in account for account in accounts)
 
 def test_capacity_and_cross_origin(tmp_path,monkeypatch):
     client,state=gateway(tmp_path,monkeypatch)
@@ -51,3 +57,17 @@ def test_capacity_and_cross_origin(tmp_path,monkeypatch):
     assert client.post('/api/runs',json={'intent':'second'}).status_code==429
     state['owner']=0
     assert client.post('/api/runs',json={'intent':'after completion'}).status_code==202
+
+def test_duplicate_runtime_url_rejected(tmp_path):
+    slots={'owner':{'username':'admin','url':'http://same'},'beta01':{'username':'betaadmin01','url':'http://same/'}}
+    config=tmp_path/'slots.json';config.write_text(json.dumps(slots))
+    with pytest.raises(ValueError,match='same Runtime URL'):
+        create_gateway(config,transport=httpx.MockTransport(lambda request:httpx.Response(200)))
+
+def test_capacity_health_failure_is_not_zero_inflight(tmp_path,monkeypatch):
+    client,state=gateway(tmp_path,monkeypatch)
+    client.post('/api/auth/login',json={'username':'admin','password':'correct-password'})
+    state['beta01']='error'
+    response=client.post('/api/runs',json={'intent':'should not fail open'})
+    assert response.status_code==503
+    assert state['owner']==0

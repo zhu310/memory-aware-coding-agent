@@ -138,6 +138,30 @@ coding-agent --workspace E:\path\to\your-project api --host 127.0.0.1 --port 800
 /send
 ```
 
+## Deployment boundary
+
+The supported runtime topology is:
+
+```text
+1 Workspace = 1 API Process = 1 AgentRuntime
+```
+
+Do not run multiple API processes against the same workspace. The local JSONL,
+SQLite and file stores are scoped to one workspace-owned Runtime process, not a
+cross-process coordination layer.
+
+The optional Gateway is a static route table only:
+
+```text
+account/slot -> pre-existing Runtime API URL
+```
+
+It does not create workspaces, create accounts on disk, start Runtime processes,
+allocate ports, manage Docker/containers, provision volumes, assign disk space,
+or perform dynamic user provisioning. The deployer must ensure each configured
+slot points to the intended independent workspace runtime. The Gateway only
+validates facts visible in its static config, such as duplicate Runtime URLs.
+
 ## Benchmark
 
 运行本地上下文压缩 benchmark：
@@ -218,10 +242,8 @@ python -m pytest final_version_app\tests -q
 当前本地测试结果：
 
 ```text
-107 passed, 1 skipped
+111 passed
 ```
-
-其中 `skipped` 是本机缺少可选外部媒体或渲染依赖时的预期跳过。
 
 ## 安全说明
 

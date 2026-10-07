@@ -1,13 +1,14 @@
 """Document parser worker. Outputs bounded segments with explicit source locations."""
 from __future__ import annotations
-import csv,io,json,re,sys,zipfile
+import csv,io,json,re,sys,wave,zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 MAX_TEXT=2_000_000
 TEXT_SUFFIXES={'.txt','.md','.csv','.json','.jsonl','.py','.js','.ts','.tsx','.jsx','.html','.css','.yaml','.yml','.xml','.sql','.log','.sh','.toml','.ini','.ipynb','.go','.rs','.java','.c','.cpp','.h','.vue','.svelte','.env.example'}
 IMAGE_SUFFIXES={'.png','.jpg','.jpeg','.webp','.gif','.bmp','.tiff','.tif'}
-SUPPORTED=TEXT_SUFFIXES|IMAGE_SUFFIXES|{'.pdf','.docx','.xlsx','.pptx','.zip'}
+AUDIO_SUFFIXES={'.wav','.mp3'}
+SUPPORTED=TEXT_SUFFIXES|IMAGE_SUFFIXES|AUDIO_SUFFIXES|{'.pdf','.docx','.xlsx','.pptx','.zip'}
 
 def decode(data):
     for encoding in (['utf-16'] if data.startswith((b'\xff\xfe',b'\xfe\xff')) else ['utf-8-sig','gb18030']):
@@ -27,6 +28,36 @@ def checked_zip(path):
         if entry.flag_bits&1:archive.close();raise ValueError('Password-protected archives are not supported')
     return archive
 
+def parse_audio(path,suffix):
+    if suffix=='.wav':
+        try:
+            with wave.open(str(path),'rb') as audio:
+                frames=audio.getnframes();sample_rate=audio.getframerate()
+                metadata={
+                    'media_kind':'audio','format':'wav','codec':'pcm',
+                    'duration_seconds':round(frames/sample_rate,3) if sample_rate else None,
+                    'sample_rate_hz':sample_rate,'channels':audio.getnchannels(),
+                    'sample_width_bits':audio.getsampwidth()*8,
+                    'bitrate_bps':sample_rate*audio.getnchannels()*audio.getsampwidth()*8 if sample_rate else None,
+                }
+        except wave.Error as exc:raise ValueError(f'Invalid WAV audio: {exc}') from exc
+    else:
+        try:
+            from mutagen.mp3 import MP3
+            from mutagen import MutagenError
+        except ImportError as exc:raise ValueError('MP3 metadata parsing requires the mutagen dependency; install project dependencies before accepting MP3 assets') from exc
+        try:info=MP3(path).info
+        except MutagenError as exc:raise ValueError(f'Invalid MP3 audio: {exc}') from exc
+        metadata={
+            'media_kind':'audio','format':'mp3','codec':'mp3',
+            'duration_seconds':round(float(getattr(info,'length',0) or 0),3),
+            'sample_rate_hz':getattr(info,'sample_rate',None),
+            'channels':getattr(info,'channels',None),
+            'bitrate_bps':getattr(info,'bitrate',None),
+        }
+    metadata={key:value for key,value in metadata.items() if value is not None}
+    return {'kind':'media','media':metadata,'segments':[{'location':'technical metadata','text':json.dumps(metadata,ensure_ascii=False,sort_keys=True)}],'warnings':[]}
+
 def parse(path,name):
     path=Path(path);suffix=Path(name).suffix.lower();segments=[];warnings=[];total=0
     def add(location,text):
@@ -44,6 +75,8 @@ def parse(path,name):
             image.verify()
         with Image.open(path) as image:
             return {'segments':[],'warnings':[],'kind':'image','width':image.width,'height':image.height,'format':image.format}
+    if suffix in AUDIO_SUFFIXES:
+        return parse_audio(path,suffix)
     if suffix in TEXT_SUFFIXES:
         text=decode(path.read_bytes())
         lines=text.splitlines()

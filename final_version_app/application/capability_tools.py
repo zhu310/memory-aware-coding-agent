@@ -27,7 +27,7 @@ def capability_tools():
         return render(get_asset_store().read(file_id,query,start_segment,limit))
     @tool('file_import')
     def file_import(path:str)->str:
-        """Persist a generated workspace file as a downloadable asset. Accepts only paths inside this user's isolated workspace."""
+        """Persist a generated workspace file as a downloadable asset. Accepts only paths inside the current workspace."""
         return render(get_asset_store().import_file(path))
     @tool('file_list')
     def file_list()->str:

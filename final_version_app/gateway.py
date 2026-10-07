@@ -1,8 +1,9 @@
 ﻿"""Stateless account routing gateway; never executes agent tools or holds Docker access.
 
-Each account is the owner of a distinct runtime container and persistent volume.
-The slot cookie is routing metadata only: every request is authenticated again by
-that runtime's independent session database. Forging a slot grants no access.
+Each slot points at an already-running Runtime API URL. The deployer is
+responsible for ensuring those URLs are backed by separate workspaces. The
+gateway only validates static routing facts it can see, and never creates
+workspaces, starts runtimes, manages containers, or provisions storage.
 """
 from __future__ import annotations
 import asyncio,json,os
@@ -15,10 +16,28 @@ from starlette.background import BackgroundTask
 SLOT_COOKIE='agent_workspace_slot'
 HOP={'host','connection','keep-alive','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade','content-length'}
 
+def _load_slots(path):
+    slots=json.loads(path.read_text(encoding='utf-8-sig'))
+    if not isinstance(slots,dict) or 'owner' not in slots:
+        raise ValueError('Gateway slots must be an object containing an owner slot.')
+    seen={}
+    for key,value in slots.items():
+        if not isinstance(value,dict) or not value.get('username') or not value.get('url'):
+            raise ValueError(f'Gateway slot {key!r} must define username and url.')
+        url=str(value['url']).rstrip('/')
+        if url in seen:
+            raise ValueError(
+                'Gateway static deployment constraint violated: '
+                f"slots {seen[url]!r} and {key!r} use the same Runtime URL {url!r}."
+            )
+        seen[url]=key
+        value['url']=url
+    return slots
+
 def create_gateway(config_path=None,transport=None):
     app=FastAPI(docs_url=None,redoc_url=None,openapi_url=None)
     path=Path(config_path or os.environ['AGENT_GATEWAY_CONFIG'])
-    slots=json.loads(path.read_text(encoding='utf-8'))
+    slots=_load_slots(path)
     lock=asyncio.Lock()
     def client():return httpx.AsyncClient(trust_env=False,timeout=httpx.Timeout(90,connect=3),follow_redirects=False,transport=transport)
     def slot_for(request):return request.cookies.get(SLOT_COOKIE,'owner') if request.cookies.get(SLOT_COOKIE,'owner') in slots else 'owner'
@@ -47,7 +66,7 @@ def create_gateway(config_path=None,transport=None):
             async with client() as http:
                 response=await http.get(slots['owner']['url']+'/api/auth/status',headers=headers)
             if slot!='owner' or not response.json().get('authenticated'):raise HTTPException(403,'Owner administrator required.')
-            return {'accounts':[{'username':value['username'],'role':'workspace_admin','isolated_workspace':True} for value in slots.values()]}
+            return {'accounts':[{'username':value['username'],'role':'workspace_admin','configured_route':value['url']} for value in slots.values()]}
         target=slots[slot]['url']+'/api/'+route
         if request.url.query:target+='?'+request.url.query
         http=client()
@@ -65,8 +84,11 @@ def create_gateway(config_path=None,transport=None):
                         try:
                             state=await http.get(value['url']+'/api/health')
                             return int(state.json().get('queue',{}).get('inflight',0))
-                        except (httpx.HTTPError,ValueError):return 0
-                    total=sum(await asyncio.gather(*(inflight(v) for v in slots.values())))
+                        except (httpx.HTTPError,ValueError,KeyError,TypeError):return None
+                    loads=await asyncio.gather(*(inflight(v) for v in slots.values()))
+                    if any(value is None for value in loads):
+                        raise HTTPException(503,'Runtime capacity is temporarily unavailable.')
+                    total=sum(loads)
                     if total>=int(os.getenv('AGENT_GLOBAL_MAX_RUNS','2')):raise HTTPException(429,'当前有任务正在执行，请稍后重试。')
                     upstream=await send()
             else:upstream=await send()
